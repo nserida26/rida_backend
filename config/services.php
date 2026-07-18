@@ -35,4 +35,18 @@ return [
         ],
     ],
 
+    'ultramsg' => [
+        'instance_id' => env('ULTRAMSG_INSTANCE_ID'),
+        'token' => env('ULTRAMSG_TOKEN'),
+    ],
+
+    'firebase' => [
+        'credentials_path' => env('FIREBASE_CREDENTIALS', storage_path('app/firebase-credentials.json')),
+        'project_id'       => env('FIREBASE_PROJECT_ID'),
+    ],
+
+    'masar' => [
+        'ride_commission_amount' => (float) env('RIDE_COMMISSION_AMOUNT', 10),
+    ],
+
 ];

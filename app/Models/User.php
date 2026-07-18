@@ -14,15 +14,20 @@ class User extends Authenticatable
 
     protected $fillable = [
         'name', 'email', 'phone', 'password',
-        'role', 'is_active', 'avatar', 'fcm_token',
+        'role', 'is_active', 'avatar', 'fcm_token', 'last_login_at',
+        'is_broker_enabled', 'broker_credit_balance', 'broker_total_recharged',
     ];
 
     protected $hidden = ['password', 'remember_token'];
 
     protected $casts = [
-        'email_verified_at' => 'datetime',
-        'password'          => 'hashed',
-        'is_active'         => 'boolean',
+        'email_verified_at'      => 'datetime',
+        'password'               => 'hashed',
+        'is_active'              => 'boolean',
+        'last_login_at'          => 'datetime',
+        'is_broker_enabled'      => 'boolean',
+        'broker_credit_balance'  => 'float',
+        'broker_total_recharged' => 'float',
     ];
 
     // ===== Relations =====
@@ -30,11 +35,6 @@ class User extends Authenticatable
     public function captainProfile()
     {
         return $this->hasOne(CaptainProfile::class);
-    }
-
-    public function brokerProfile()
-    {
-        return $this->hasOne(BrokerProfile::class);
     }
 
     public function ridesAsClient()
@@ -45,11 +45,6 @@ class User extends Authenticatable
     public function ridesAsCaptain()
     {
         return $this->hasMany(Ride::class, 'captain_id');
-    }
-
-    public function ridesAsBroker()
-    {
-        return $this->hasMany(Ride::class, 'broker_id');
     }
 
     public function subscriptions()
@@ -67,7 +62,6 @@ class User extends Authenticatable
     public function isAdmin(): bool    { return $this->role === 'admin'; }
     public function isCaptain(): bool  { return $this->role === 'captain'; }
     public function isClient(): bool   { return $this->role === 'client'; }
-    public function isBroker(): bool   { return $this->role === 'broker'; }
 
     // ===== Accessors =====
 

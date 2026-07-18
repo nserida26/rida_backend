@@ -14,7 +14,7 @@ return new class extends Migration
             $table->string('email')->unique();
             $table->string('phone')->unique();
             $table->string('password');
-            $table->enum('role', ['admin', 'captain', 'client', 'broker']);
+            $table->enum('role', ['admin', 'captain', 'client']);
             $table->boolean('is_active')->default(true);
             $table->string('avatar')->nullable();
             $table->string('fcm_token')->nullable(); // Pour les notifications push

@@ -14,10 +14,11 @@ class Ride extends Model
         'pickup_address', 'pickup_lat', 'pickup_lng',
         'dropoff_address', 'dropoff_lat', 'dropoff_lng',
         'status', 'estimated_price', 'final_price',
-        'distance_km', 'duration_minutes',
+        'distance_km', 'duration_minutes', 'captain_commission',
+        'commission_debited_at', 'commission_refunded_at',
         'payment_method', 'is_paid', 'points_earned',
         'accepted_at', 'arrived_at', 'started_at', 'completed_at',
-        'cancelled_at', 'cancel_reason', 'rating', 'comment',
+        'cancelled_at', 'cancel_reason', 'third_party_phone', 'rating', 'comment',
     ];
 
     protected $casts = [
@@ -28,7 +29,10 @@ class Ride extends Model
         'estimated_price'   => 'float',
         'final_price'       => 'float',
         'distance_km'       => 'float',
+        'captain_commission' => 'float',
         'is_paid'           => 'boolean',
+        'commission_debited_at' => 'datetime',
+        'commission_refunded_at' => 'datetime',
         'accepted_at'       => 'datetime',
         'arrived_at'        => 'datetime',
         'started_at'        => 'datetime',
@@ -78,12 +82,21 @@ class Ride extends Model
 
     public function accept(User $captain): void
     {
+        $commission = (float) config('services.masar.ride_commission_amount', 10);
+        $profile = $captain->captainProfile;
+
+        if (!$profile || !$profile->debitRideCommission($commission)) {
+            throw new \RuntimeException('Solde abonnement insuffisant.');
+        }
+
         $this->update([
-            'captain_id'  => $captain->id,
-            'status'      => 'accepted',
-            'accepted_at' => now(),
+            'captain_id'            => $captain->id,
+            'status'                => 'accepted',
+            'captain_commission'    => $commission,
+            'commission_debited_at' => now(),
+            'accepted_at'           => now(),
         ]);
-        $captain->captainProfile->update(['status' => 'busy']);
+        $profile->update(['status' => 'busy']);
     }
 
     public function markArrived(): void
@@ -98,39 +111,52 @@ class Ride extends Model
 
     public function complete(float $finalPrice): void
     {
-        $points = 1; // Règle par défaut : 1 point par course
-
         $this->update([
             'status'        => 'completed',
             'final_price'   => $finalPrice,
             'is_paid'       => true,
-            'points_earned' => $points,
+            'points_earned' => 0,
             'completed_at'  => now(),
         ]);
 
-        // Attribuer les points au captain
         if ($this->captain) {
-            $this->captain->captainProfile->addPoints($points, $this->id, 'Course #' . $this->reference);
-            $this->captain->captainProfile->update(['status' => 'available']);
+            $profile = $this->captain->captainProfile?->fresh();
+            $profile?->hasActiveSubscription()
+                ? $profile->setAvailable()
+                : $profile?->setOffline();
         }
 
-        // Débiter le broker si paiement broker_credit
+        // Débiter le crédit client si course pour tiers
         if ($this->payment_method === 'broker_credit' && $this->broker_id) {
-            $this->broker->brokerProfile->decrement('credit_balance', $finalPrice);
-            $this->broker->brokerProfile->increment('total_spent', $finalPrice);
+            $this->broker?->decrement('broker_credit_balance', $finalPrice);
         }
     }
 
     public function cancel(string $reason = ''): void
     {
+        $refundedAt = $this->commission_refunded_at;
+        if (
+            $this->captain
+            && $this->commission_debited_at
+            && !$this->commission_refunded_at
+            && $this->captain_commission > 0
+        ) {
+            $this->captain->captainProfile?->refundRideCommission($this->captain_commission);
+            $refundedAt = now();
+        }
+
         $this->update([
             'status'        => 'cancelled',
             'cancel_reason' => $reason,
             'cancelled_at'  => now(),
+            'commission_refunded_at' => $refundedAt,
         ]);
 
         if ($this->captain) {
-            $this->captain->captainProfile->update(['status' => 'available']);
+            $profile = $this->captain->captainProfile?->fresh();
+            $profile?->hasActiveSubscription()
+                ? $profile->setAvailable()
+                : $profile?->setOffline();
         }
     }
 

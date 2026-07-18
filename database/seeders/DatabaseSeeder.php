@@ -3,7 +3,6 @@
 namespace Database\Seeders;
 
 use App\Models\CaptainProfile;
-use App\Models\BrokerProfile;
 use App\Models\User;
 use Illuminate\Database\Seeder;
 
@@ -52,28 +51,9 @@ class DatabaseSeeder extends Seeder
             'is_active' => true,
         ]);
 
-        // Broker de test
-        $broker = User::create([
-            'name'      => 'Hotel Sahara',
-            'email'     => 'broker@etaxis.mr',
-            'phone'     => '+22200000003',
-            'password'  => bcrypt('Broker@1234'),
-            'role'      => 'broker',
-            'is_active' => true,
-        ]);
-        BrokerProfile::create([
-            'user_id'         => $broker->id,
-            'company_name'    => 'Hotel Sahara Nouakchott',
-            'address'         => 'Rue Mamadou Konaté, Nouakchott',
-            'credit_balance'  => 5000.00,
-            'total_recharged' => 5000.00,
-            'is_approved'     => true,
-        ]);
-
         $this->command->info('✅ Données de base créées avec succès.');
         $this->command->info('   Admin:   admin@etaxis.mr / Admin@1234');
         $this->command->info('   Captain: +22200000001 / Captain@1234');
         $this->command->info('   Client:  +22200000002 / Client@1234');
-        $this->command->info('   Broker:  +22200000003 / Broker@1234');
     }
 }

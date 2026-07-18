@@ -29,23 +29,30 @@ class CaptainProfile extends Model
 
     public function hasActiveSubscription(): bool
     {
-        return CaptainSubscription::where('captain_id', $this->user_id)
+        $commission = (float) config('services.masar.ride_commission_amount', 10);
+
+        return $this->balance >= $commission
+            && CaptainSubscription::where('captain_id', $this->user_id)
             ->where('is_active', true)
             ->where('valid_until', '>=', now()->toDateString())
             ->exists();
     }
 
-    public function addPoints(int $points, ?int $rideId = null, string $note = ''): void
+    public function debitRideCommission(float $amount): bool
     {
-        $this->increment('points', $points);
+        if ($this->fresh()->balance < $amount) {
+            return false;
+        }
 
-        CaptainPointsHistory::create([
-            'captain_id' => $this->user_id,
-            'ride_id'    => $rideId,
-            'points'     => $points,
-            'type'       => 'earned',
-            'note'       => $note,
-        ]);
+        $this->decrement('balance', $amount);
+        return true;
+    }
+
+    public function refundRideCommission(float $amount): void
+    {
+        if ($amount > 0) {
+            $this->increment('balance', $amount);
+        }
     }
 
     public function updateLocation(float $lat, float $lng): void

@@ -55,22 +55,17 @@ class CaptainController extends Controller
     }
 
     /**
-     * Mes points et historique
+     * Ancien endpoint points garde pour compatibilite mobile.
      */
     public function points(Request $request): JsonResponse
     {
         $captain = $request->user();
         $profile = $captain->captainProfile;
 
-        $history = $captain->pointsHistory()
-            ->with('ride:id,reference,pickup_address,dropoff_address')
-            ->latest()
-            ->paginate(20);
-
         return response()->json([
-            'total_points' => $profile->points,
+            'total_points' => 0,
             'balance'      => $profile->balance,
-            'history'      => $history,
+            'history'      => ['data' => []],
         ]);
     }
 
@@ -115,14 +110,15 @@ class CaptainController extends Controller
             'today' => [
                 'rides'    => (clone $today)->count(),
                 'earnings' => (clone $today)->sum('final_price'),
-                'points'   => (clone $today)->sum('points_earned'),
+                'commission_balance' => $profile->balance,
             ],
             'week' => [
                 'rides'    => (clone $week)->count(),
                 'earnings' => (clone $week)->sum('final_price'),
-                'points'   => (clone $week)->sum('points_earned'),
+                'commission_balance' => $profile->balance,
             ],
-            'total_points' => $profile->points,
+            'total_points' => 0,
+            'commission_amount' => (float) config('services.masar.ride_commission_amount', 10),
         ]);
     }
 
@@ -131,22 +127,76 @@ class CaptainController extends Controller
      */
     public function availableCaptains(Request $request): JsonResponse
     {
-        $captains = User::where('role', 'captain')
-            ->where('is_active', true)
-            ->whereHas('captainProfile', fn($q) => $q->where('status', 'available'))
-            ->with('captainProfile')
+        $captains = $this->availableCaptainsQuery()
             ->get()
-            ->map(fn($u) => [
-                'id'          => $u->id,
-                'name'        => $u->name,
-                'phone'       => $u->phone,
-                'lat'         => $u->captainProfile->current_lat,
-                'lng'         => $u->captainProfile->current_lng,
-                'vehicle'     => $u->captainProfile->vehicle_brand . ' ' . $u->captainProfile->vehicle_model,
-                'plate'       => $u->captainProfile->vehicle_plate,
-                'points'      => $u->captainProfile->points,
-            ]);
+            ->map(fn($u) => $this->formatNearbyCaptain($u));
 
         return response()->json(['captains' => $captains]);
+    }
+
+    /**
+     * Client : drivers disponibles autour d'un point de depart.
+     */
+    public function nearbyCaptains(Request $request): JsonResponse
+    {
+        $request->validate([
+            'lat'       => 'required|numeric',
+            'lng'       => 'required|numeric',
+            'radius_km' => 'nullable|numeric|min:0.1|max:25',
+        ]);
+
+        $lat = (float) $request->lat;
+        $lng = (float) $request->lng;
+        $radiusKm = (float) ($request->radius_km ?? 3.5);
+
+        $captains = $this->availableCaptainsQuery()
+            ->selectRaw(
+                '(6371 * acos(cos(radians(?)) * cos(radians(captain_profiles.current_lat)) * cos(radians(captain_profiles.current_lng) - radians(?)) + sin(radians(?)) * sin(radians(captain_profiles.current_lat)))) as distance_km',
+                [$lat, $lng, $lat]
+            )
+            ->having('distance_km', '<=', $radiusKm)
+            ->orderBy('distance_km')
+            ->limit(20)
+            ->get()
+            ->map(fn($u) => $this->formatNearbyCaptain($u));
+
+        return response()->json(['drivers' => $captains]);
+    }
+
+    private function availableCaptainsQuery()
+    {
+        return User::query()
+            ->join('captain_profiles', 'captain_profiles.user_id', '=', 'users.id')
+            ->where('users.role', 'captain')
+            ->where('users.is_active', true)
+            ->where('captain_profiles.status', 'available')
+            ->whereNotNull('captain_profiles.current_lat')
+            ->whereNotNull('captain_profiles.current_lng')
+            ->select([
+                'users.id',
+                'users.name',
+                'users.phone',
+                'captain_profiles.current_lat as lat',
+                'captain_profiles.current_lng as lng',
+                'captain_profiles.vehicle_brand',
+                'captain_profiles.vehicle_model',
+                'captain_profiles.vehicle_plate',
+                'captain_profiles.balance',
+            ]);
+    }
+
+    private function formatNearbyCaptain($captain): array
+    {
+        return [
+            'id'          => $captain->id,
+            'name'        => $captain->name,
+            'phone'       => $captain->phone,
+            'lat'         => $captain->lat,
+            'lng'         => $captain->lng,
+            'vehicle'     => trim($captain->vehicle_brand . ' ' . $captain->vehicle_model),
+            'plate'       => $captain->vehicle_plate,
+            'balance'     => $captain->balance,
+            'distance_km' => isset($captain->distance_km) ? round((float) $captain->distance_km, 2) : null,
+        ];
     }
 }

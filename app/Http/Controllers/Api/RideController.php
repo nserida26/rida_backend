@@ -5,14 +5,17 @@ namespace App\Http\Controllers\Api;
 use App\Http\Controllers\Controller;
 use App\Models\Ride;
 use App\Models\User;
+use App\Services\FcmService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 
 class RideController extends Controller
 {
+    private const DRIVER_NEIGHBORHOOD_RADIUS_KM = 3.5;
+
     /**
-     * Client / Broker : Créer une nouvelle course
+     * Client : Créer une nouvelle course
      */
     public function store(Request $request): JsonResponse
     {
@@ -24,7 +27,9 @@ class RideController extends Controller
             'dropoff_lat'     => 'required|numeric',
             'dropoff_lng'     => 'required|numeric',
             'estimated_price' => 'nullable|numeric|min:0',
-            // Pour broker : peut créer au nom d'un client
+            'distance_km'     => 'nullable|numeric|min:0',
+            'duration_minutes' => 'nullable|integer|min:0',
+            // Fonctionnalité client "course pour tiers"
             'client_name'     => 'nullable|string',
             'client_phone'    => 'nullable|string',
         ]);
@@ -33,16 +38,9 @@ class RideController extends Controller
 
         DB::beginTransaction();
         try {
-            // Si broker lance la course : créer/retrouver le client
+            // Si la fonctionnalité est activée : créer/retrouver le client tiers
             $clientId = $user->id;
-            if ($user->isBroker()) {
-                // Vérifier le crédit broker si la course est prépayée
-                $broker = $user->brokerProfile;
-                if (!$broker || !$broker->is_approved) {
-                    return response()->json(['message' => 'Compte broker non approuvé.'], 403);
-                }
-
-                // Créer un client temporaire si numéro fourni
+            if ($user->isClient() && $user->is_broker_enabled) {
                 if ($request->client_phone) {
                     $clientUser = User::firstOrCreate(
                         ['phone' => $request->client_phone],
@@ -58,26 +56,28 @@ class RideController extends Controller
 
             $ride = Ride::create([
                 'client_id'       => $clientId,
-                'broker_id'       => $user->isBroker() ? $user->id : null,
+                'broker_id'       => ($user->isClient() && $user->is_broker_enabled) ? $user->id : null,
                 'pickup_address'  => $request->pickup_address,
                 'pickup_lat'      => $request->pickup_lat,
                 'pickup_lng'      => $request->pickup_lng,
                 'dropoff_address' => $request->dropoff_address,
                 'dropoff_lat'     => $request->dropoff_lat,
                 'dropoff_lng'     => $request->dropoff_lng,
-                'estimated_price' => $request->estimated_price,
-                'payment_method'  => $user->isBroker() ? 'broker_credit' : 'cash',
+                'estimated_price' => $request->estimated_price ?? $this->priceForKm($request->distance_km),
+                'distance_km'     => $request->distance_km,
+                'duration_minutes' => $request->duration_minutes,
+                'payment_method'  => ($user->isClient() && $user->is_broker_enabled) ? 'broker_credit' : 'cash',
             ]);
 
             DB::commit();
 
-            // TODO: Notifier les captains disponibles via WebSocket/FCM
+            app(FcmService::class)->sendNewRideToAvailableCaptains($ride);
+            app(FcmService::class)->sendRideUpdateToCustomer($ride->fresh(['client']), 'ride_created');
 
             return response()->json([
                 'message' => 'Course créée avec succès.',
                 'ride'    => $this->formatRide($ride),
             ], 201);
-
         } catch (\Throwable $e) {
             DB::rollBack();
             return response()->json(['message' => 'Erreur lors de la création: ' . $e->getMessage()], 500);
@@ -108,7 +108,16 @@ class RideController extends Controller
             return response()->json(['message' => 'Abonnement requis pour accepter des courses.'], 403);
         }
 
-        $ride->accept($captain);
+        DB::beginTransaction();
+        try {
+            $ride->accept($captain);
+            DB::commit();
+        } catch (\Throwable $e) {
+            DB::rollBack();
+            return response()->json(['message' => $e->getMessage()], 422);
+        }
+
+        app(FcmService::class)->sendRideUpdateToCustomer($ride->fresh(['client', 'captain']), 'ride_accepted');
 
         return response()->json([
             'message' => 'Course acceptée.',
@@ -130,6 +139,7 @@ class RideController extends Controller
         }
 
         $ride->markArrived();
+        app(FcmService::class)->sendRideUpdateToCustomer($ride->fresh(['client', 'captain']), 'driver_arrived');
 
         return response()->json(['message' => 'Arrivée confirmée.', 'ride' => $this->formatRide($ride)]);
     }
@@ -148,6 +158,7 @@ class RideController extends Controller
         }
 
         $ride->start();
+        app(FcmService::class)->sendRideUpdateToCustomer($ride->fresh(['client', 'captain']), 'ride_started');
 
         return response()->json(['message' => 'Course démarrée.', 'ride' => $this->formatRide($ride)]);
     }
@@ -176,14 +187,11 @@ class RideController extends Controller
             'duration_minutes' => $request->duration_minutes,
         ]);
         $ride->complete($request->final_price);
-
-        $captain = $request->user()->captainProfile->fresh();
+        app(FcmService::class)->sendRideUpdateToCustomer($ride->fresh(['client', 'captain']), 'ride_completed');
 
         return response()->json([
-            'message'      => 'Course terminée. Points crédités.',
+            'message'      => 'Course terminée.',
             'ride'         => $this->formatRide($ride->fresh()),
-            'points_earned' => $ride->points_earned,
-            'total_points' => $captain->points,
         ]);
     }
 
@@ -209,6 +217,9 @@ class RideController extends Controller
         }
 
         $ride->cancel($request->reason ?? '');
+        $freshRide = $ride->fresh(['client', 'captain']);
+        app(FcmService::class)->sendRideUpdateToCustomer($freshRide, 'ride_cancelled');
+        app(FcmService::class)->sendRideUpdateToDriver($freshRide, 'ride_cancelled');
 
         return response()->json(['message' => 'Course annulée.', 'ride' => $this->formatRide($ride)]);
     }
@@ -222,8 +233,23 @@ class RideController extends Controller
             return response()->json(['message' => 'Accès refusé.'], 403);
         }
 
+        $profile = $request->user()->captainProfile;
+        if (!$profile || $profile->current_lat === null || $profile->current_lng === null) {
+            return response()->json(['rides' => []]);
+        }
+
+        $lat = (float) $profile->current_lat;
+        $lng = (float) $profile->current_lng;
+
         $rides = Ride::pending()
             ->with(['client:id,name,phone'])
+            ->select('rides.*')
+            ->selectRaw(
+                '(6371 * acos(cos(radians(?)) * cos(radians(pickup_lat)) * cos(radians(pickup_lng) - radians(?)) + sin(radians(?)) * sin(radians(pickup_lat)))) as distance_to_pickup_km',
+                [$lat, $lng, $lat]
+            )
+            ->having('distance_to_pickup_km', '<=', self::DRIVER_NEIGHBORHOOD_RADIUS_KM)
+            ->orderBy('distance_to_pickup_km')
             ->latest()
             ->get()
             ->map(fn($r) => $this->formatRide($r));
@@ -232,7 +258,7 @@ class RideController extends Controller
     }
 
     /**
-     * Mes courses (client, captain, broker)
+     * Mes courses (client, captain)
      */
     public function myRides(Request $request): JsonResponse
     {
@@ -243,8 +269,6 @@ class RideController extends Controller
             $query->where('client_id', $user->id);
         } elseif ($user->isCaptain()) {
             $query->where('captain_id', $user->id);
-        } elseif ($user->isBroker()) {
-            $query->where('broker_id', $user->id);
         }
 
         $rides = $query->latest()->paginate(20);
@@ -267,7 +291,7 @@ class RideController extends Controller
             return response()->json(['message' => 'Accès refusé.'], 403);
         }
 
-        return response()->json($this->formatRide($ride->load(['client', 'captain', 'broker'])));
+        return response()->json($this->formatRide($ride->load(['client', 'captain.captainProfile', 'broker'])));
     }
 
     /**
@@ -295,6 +319,8 @@ class RideController extends Controller
 
     private function formatRide(Ride $ride): array
     {
+        $captainProfile = $ride->captain?->captainProfile;
+
         return [
             'id'               => $ride->id,
             'reference'        => $ride->reference,
@@ -309,10 +335,22 @@ class RideController extends Controller
             'final_price'      => $ride->final_price,
             'distance_km'      => $ride->distance_km,
             'duration_minutes' => $ride->duration_minutes,
+            'captain_commission' => $ride->captain_commission,
+            'commission_debited_at' => $ride->commission_debited_at?->toIso8601String(),
+            'commission_refunded_at' => $ride->commission_refunded_at?->toIso8601String(),
             'payment_method'   => $ride->payment_method,
             'is_paid'          => $ride->is_paid,
             'points_earned'    => $ride->points_earned,
             'is_broker_ride'   => $ride->isByBroker(),
+            'is_third_party'   => $ride->isByBroker() || !is_null($ride->third_party_phone),
+            'third_party_name' => $ride->isByBroker() ? $ride->client?->name : null,
+            'third_party_phone' => $ride->third_party_phone ?? ($ride->isByBroker() ? $ride->client?->phone : null),
+            // Passenger contact resolved on the backend: third_party_phone takes priority
+            'contact_phone'    => $ride->third_party_phone ?? ($ride->client?->phone ?: null),
+            'contact_name'     => ($ride->client?->name ?: null),
+            // Captain real-time GPS for customer map car marker
+            'captain_lat'      => $captainProfile?->current_lat,
+            'captain_lng'      => $captainProfile?->current_lng,
             'rating'           => $ride->rating,
             'comment'          => $ride->comment,
             'accepted_at'      => $ride->accepted_at?->toIso8601String(),
@@ -328,8 +366,21 @@ class RideController extends Controller
                 'id'      => $ride->captain?->id,
                 'name'    => $ride->captain?->name,
                 'phone'   => $ride->captain?->phone,
-                'profile' => $ride->captain?->captainProfile,
+                'profile' => $captainProfile,
             ] : null,
         ];
+    }
+
+    private function priceForKm(?float $km): ?float
+    {
+        if ($km === null) {
+            return null;
+        }
+
+        if ($km <= 3) {
+            return 100;
+        }
+
+        return 100 + (ceil(($km - 3) / 0.5) * 10);
     }
 }

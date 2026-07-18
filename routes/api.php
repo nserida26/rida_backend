@@ -2,23 +2,24 @@
 
 use App\Http\Controllers\Api\AdminController;
 use App\Http\Controllers\Api\AuthController;
-use App\Http\Controllers\Api\BrokerController;
 use App\Http\Controllers\Api\CaptainController;
 use App\Http\Controllers\Api\RideController;
 use Illuminate\Support\Facades\Route;
 
 /*
 |--------------------------------------------------------------------------
-| API Routes — e-Taxis
+| API Routes
 |--------------------------------------------------------------------------
 */
 
 // ===== AUTH PUBLIC =====
 Route::prefix('auth')->group(function () {
     Route::post('/login',             [AuthController::class, 'login']);
+    Route::post('/otp/send',          [AuthController::class, 'sendOtp']);
+    Route::post('/otp/verify',        [AuthController::class, 'verifyOtp']);
     Route::post('/register/client',   [AuthController::class, 'registerClient']);
     Route::post('/register/captain',  [AuthController::class, 'registerCaptain']);
-    Route::post('/register/broker',   [AuthController::class, 'registerBroker']);
+    Route::post('/register/driver',   [AuthController::class, 'registerCaptain']); // alias mobile app
 });
 
 // ===== ROUTES AUTHENTIFIÉES =====
@@ -29,9 +30,10 @@ Route::middleware('auth:sanctum')->group(function () {
         Route::get('/me',              [AuthController::class, 'me']);
         Route::post('/logout',         [AuthController::class, 'logout']);
         Route::post('/change-password', [AuthController::class, 'changePassword']);
+        Route::post('/fcm-token',      [AuthController::class, 'updateFcmToken']);
     });
 
-    // ===== COURSES (Client + Broker) =====
+    // ===== COURSES =====
     Route::prefix('rides')->group(function () {
         Route::get('/',                [RideController::class, 'myRides']);
         Route::post('/',               [RideController::class, 'store']);
@@ -46,6 +48,8 @@ Route::middleware('auth:sanctum')->group(function () {
     });
 
     // ===== CAPTAIN =====
+    Route::get('/drivers/nearby', [CaptainController::class, 'nearbyCaptains']);
+
     Route::prefix('captain')->group(function () {
         Route::get('/dashboard',           [CaptainController::class, 'dashboard']);
         Route::post('/location',           [CaptainController::class, 'updateLocation']);
@@ -55,10 +59,14 @@ Route::middleware('auth:sanctum')->group(function () {
         Route::get('/available-captains',  [CaptainController::class, 'availableCaptains']); // Admin + Broker
     });
 
-    // ===== BROKER =====
-    Route::prefix('broker')->group(function () {
-        Route::get('/dashboard',  [BrokerController::class, 'dashboard']);
-        Route::get('/recharges',  [BrokerController::class, 'recharges']);
+    // Compatibilité mobile (driver = captain)
+    Route::prefix('driver')->group(function () {
+        Route::get('/dashboard',           [CaptainController::class, 'dashboard']);
+        Route::post('/location',           [CaptainController::class, 'updateLocation']);
+        Route::post('/status',             [CaptainController::class, 'setStatus']);
+        Route::get('/points',              [CaptainController::class, 'points']);
+        Route::get('/subscriptions',       [CaptainController::class, 'subscriptions']);
+        Route::get('/nearby',              [CaptainController::class, 'nearbyCaptains']);
     });
 
     // ===== ADMIN =====
@@ -74,13 +82,19 @@ Route::middleware('auth:sanctum')->group(function () {
         Route::post('/subscriptions',           [AdminController::class, 'storeSubscription']);
         Route::get('/subscriptions',            [AdminController::class, 'subscriptions']);
 
-        // Recharge broker
-        Route::post('/broker/recharge',         [AdminController::class, 'brokerRecharge']);
+        // Fonctionnalité course pour tiers (clients)
+        Route::post('/users/{user}/enable-third-party', [AdminController::class, 'enableBroker']);
+        Route::post('/users/{user}/recharge',   [AdminController::class, 'rechargeBroker']);
+
+        // Notifications
+        Route::post('/notifications/send',      [AdminController::class, 'sendNotification']);
 
         // Courses
         Route::get('/rides',                    [AdminController::class, 'allRides']);
-
+        Route::post('/rides',                   [AdminController::class, 'createRide']);
+ 
         // Ajustement points
         Route::post('/captain/adjust-points',   [AdminController::class, 'adjustPoints']);
+        Route::post('/driver/adjust-points',    [AdminController::class, 'adjustPoints']); // alias mobile app
     });
 });
